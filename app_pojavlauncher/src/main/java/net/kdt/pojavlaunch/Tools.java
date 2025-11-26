@@ -656,8 +656,6 @@ public final class Tools {
                 fromStringArray(minecraftArgs.toArray(new String[0])):
                 versionInfo.minecraftArguments;
 
-        if(profile.isDemo()) mcArguments += " --demo";
-
         return JSONUtils.insertJSONValueList(splitAndFilterEmpty(mcArguments), varArgMap);
     }
 
