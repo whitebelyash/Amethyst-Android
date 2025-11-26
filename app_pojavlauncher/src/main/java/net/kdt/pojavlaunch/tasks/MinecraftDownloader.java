@@ -74,15 +74,10 @@ public class MinecraftDownloader {
     public void start(@Nullable Activity activity, @Nullable JMinecraftVersionList.Version version,
                       @NonNull String realVersion,
                       @NonNull AsyncMinecraftDownloader.DoneListener listener) {
-        if(activity != null){
-            isLocalProfile = Tools.isLocalProfile(activity);
-            isOnline = Tools.isOnline(activity);
-            Tools.switchDemo(Tools.isDemoProfile(activity));
-
-        } else {
-            isLocalProfile = true;
-            Tools.switchDemo(true);
-        }
+        
+        // What a cringe check was here
+        Tools.switchDemo(false);
+        isLocalProfile = false;
 
         sExecutorService.execute(() -> {
             try {
