@@ -7,6 +7,7 @@ import static net.kdt.pojavlaunch.PojavProfile.getAllProfiles;
 import static net.kdt.pojavlaunch.prefs.LauncherPreferences.PREF_IGNORE_NOTCH;
 import static net.kdt.pojavlaunch.prefs.LauncherPreferences.PREF_NOTCH_SIZE;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.NotificationChannel;
@@ -28,7 +29,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.FileObserver;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.DocumentsContract;
@@ -63,6 +63,7 @@ import net.kdt.pojavlaunch.multirt.MultiRTUtils;
 import net.kdt.pojavlaunch.multirt.Runtime;
 import net.kdt.pojavlaunch.plugins.FFmpegPlugin;
 import net.kdt.pojavlaunch.prefs.LauncherPreferences;
+import net.kdt.pojavlaunch.tasks.AsyncAssetManager;
 import net.kdt.pojavlaunch.utils.DateUtils;
 import net.kdt.pojavlaunch.utils.DownloadUtils;
 import net.kdt.pojavlaunch.utils.FileUtils;
@@ -83,9 +84,11 @@ import org.libsdl.app.SDLControllerManager;
 import org.lwjgl.glfw.CallbackBridge;
 
 import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -93,6 +96,7 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URLConnection;
 import java.nio.charset.StandardCharsets;
@@ -112,7 +116,7 @@ public final class Tools {
 
     public static final Gson GLOBAL_GSON = new GsonBuilder().setPrettyPrinting().create();
 
-    public static final String URL_HOME = "https://angelauramc.dev/wiki";
+    public static final String URL_HOME = "https://wiki.angelauramc.dev";
     public static String NATIVE_LIB_DIR;
     public static String DIR_DATA; //Initialized later to get context
     public static File DIR_CACHE;
@@ -141,6 +145,7 @@ public final class Tools {
     public static String CTRLMAP_PATH;
     public static String CTRLDEF_FILE;
     private static RenderersList sCompatibleRenderers;
+    private static boolean isLwjgl3 = true;
 
 
     private static File getPojavStorageRoot(Context ctx) {
@@ -212,23 +217,109 @@ public final class Tools {
         switchDemo(isDemoProfile(ctx));
     }
 
+    @SuppressLint("PrivateApi")
+    private static String systemPropertiesGet(String systemProperty) throws NoSuchMethodException, ClassNotFoundException, InvocationTargetException, IllegalAccessException {
+        Class<?> cSystemProperties = Class.forName("android.os.SystemProperties");
+        Method get = cSystemProperties.getMethod("get", String.class);
+        return (String) get.invoke(null, systemProperty);
+    }
+
+    private static boolean isAdreno740(){
+        try {
+            BufferedReader br = new BufferedReader(
+                    new FileReader("/sys/class/kgsl/kgsl-3d0/gpu_model")
+            );
+            String gpuRenderer = br.readLine();
+            return gpuRenderer != null &&
+                    gpuRenderer.toLowerCase().contains("adreno") &&
+                    gpuRenderer.contains("740");
+        } catch (IOException e) {
+            // If it doesn't exist, we definitely aren't on 740
+            return false;
+        }
+    }
+
     /**
-     * Optimization mods based on Sodium can mitigate the render distance issue. Check if Sodium
-     * or its derivative is currently installed to skip the render distance check.
-     * @param gameDir current game directory
-     * @return whether sodium or a sodium-based mod is installed
+     * Detects whether or not you are on OneUI and using Adreno 740
+     * <a href="https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/freedreno/common/freedreno_devices.py?ref_type=heads#L1007-L1009">
+     *     Mesa sets it to 0 by default due to vendor quirks
+     * </a>
+     * It is possible that OneUI simply deviates from this commonality, hence why
+     * <a href="https://github.com/K11MCH1/AdrenoToolsDrivers/releases/tag/v26.0.0-rc07">
+     *     this is a common fix
+     * </a>
+     * @return Whether or not to export FD_DEV_FEATURES=enable_ubwc_flag_hint=1
      */
-    private static boolean hasSodium(File gameDir) {
+    public static boolean shouldUseUBWC() {
+        try {
+            boolean isSamsung = Build.MANUFACTURER.equalsIgnoreCase("samsung");
+            boolean isOneUI = !systemPropertiesGet("ro.build.version.oneui").isBlank();
+            return isOneUI && isSamsung && isAdreno740();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+
+    /**
+     * @return The selected "Custom path" of the current profile
+     */
+    @NonNull
+    private static File getGameDir() {
+        return getGameDirPath(LauncherProfiles.getCurrentProfile());
+    }
+
+    /**
+     * Searches for mod in mods directory of current selected profile
+     * @param filenames Filename(s) of the .jar mod(s)
+     * @return Whether or not the .jar is found
+     */
+    public static boolean hasMods(String... filenames) {
+        File gameDir = getGameDir();
         File modsDir = new File(gameDir, "mods");
-        File[] mods = modsDir.listFiles(file -> file.isFile() && file.getName().endsWith(".jar"));
-        if(mods == null) return false;
-        for(File file : mods) {
-            String name = file.getName();
-            if(name.contains("sodium") ||
-                    name.contains("embeddium") ||
-                    name.contains("rubidium")) return true;
+        File[] modFiles = modsDir.listFiles(file -> file.isFile() && file.getName().endsWith(".jar"));
+        if (modFiles == null) return false;
+        for (File file : modFiles) {
+            for (String filename : filenames)
+                if (file.getName().contains(filename)) return true;
         }
         return false;
+    }
+
+    /**
+     * Tries to delete any sodium related mods of the currently selected profile via string matching
+     * the files in the mods folder.
+     */
+    public static void deleteSodiumMods() {
+        File modsDir = new File(getGameDir(), "mods");
+        File[] mods = modsDir.listFiles(file -> file.isFile() && file.getName().endsWith(".jar"));
+        if(mods == null) ;
+        for(File file : mods) {
+            String name = file.getName().toLowerCase();
+            if(name.contains("sodium") ||
+                    name.contains("beddium")    || // Also covers embeddium
+                    name.contains("rubidium")   ||
+                    name.contains("xenon")      || // Name conflicts with another mod
+                    name.contains("celeritas")  ||
+                    name.contains("relictium")  ||
+                    name.contains("vintagium")  ||
+                    name.contains("podium")     ||
+                    name.contains("indium")     ||
+                    name.contains("lazurite")   ||
+                    name.contains("iris")       ||
+                    name.contains("monocle")    ||
+                    name.contains("voxy")       ||
+                    name.contains("nvidium")    ||
+                    name.contains("chloride")   ||
+                    name.contains("bedrodium")  ||
+                    name.contains("substrate")  || // Name conflicts with another mod
+                    name.contains("blendium")   ||
+                    name.contains("ryoamium")
+                // The name conflicts are for pretty dead mods so we ignore them.
+                // I doubt they're using some mod with less than 5k downloads with sodium.
+            ) if(!file.delete())
+                throw new RuntimeException("Failed to delete Sodium and related mods!");
+        }
     }
 
     /**
@@ -268,10 +359,10 @@ public final class Tools {
         return info.isAdreno() && info.glesMajorVersion >= 3;
     }
 
-    private static boolean checkRenderDistance(File gamedir) {
+    private static boolean affectedByLTWRenderDistanceIssue() {
         if(!"opengles3_ltw".equals(Tools.LOCAL_RENDERER)) return false;
         if(!affectedByRenderDistanceIssue()) return false;
-        if(hasSodium(gamedir)) return false;
+        if(hasMods("sodium", "embeddium", "rubidium")) return false;
 
         int renderDistance;
         try {
@@ -316,7 +407,7 @@ public final class Tools {
         File gamedir = Tools.getGameDirPath(minecraftProfile);
         startControllableMitigation(activity, gamedir);
         startOldLegacy4JMitigation(activity, gamedir);
-        if(checkRenderDistance(gamedir)) {
+        if(affectedByLTWRenderDistanceIssue()) {
             LifecycleAwareAlertDialog.DialogCreator dialogCreator = ((alertDialog, dialogBuilder) ->
                     dialogBuilder.setMessage(activity.getString(R.string.ltw_render_distance_warning_msg))
                             .setPositiveButton(android.R.string.ok, (d, w)->{}));
@@ -345,11 +436,11 @@ public final class Tools {
         OldVersionsUtils.selectOpenGlVersion(versionInfo);
 
 
-        String launchClassPath = generateLaunchClassPath(versionInfo, versionId);
+        String launchClasspath = generateLaunchClasspath(versionInfo, versionId);
 
         List<String> javaArgList = new ArrayList<>();
 
-        getCacioJavaArgs(javaArgList, runtime.javaVersion == 8);
+        getCacioJavaArgs(javaArgList, runtime.javaVersion == 8, activity);
 
         if (versionInfo.logging != null) {
             String configFile = Tools.DIR_DATA + "/security/" + versionInfo.logging.client.file.id.replace("client", "log4j-rce-patch");
@@ -367,18 +458,19 @@ public final class Tools {
         }
 
         javaArgList.addAll(Arrays.asList(getMinecraftJVMArgs(versionId, gamedir)));
-        javaArgList.add("-cp");
-        if (launchClassPath.contains("bta-client-")){ // BTADownloadTask.BASE_JSON sets this. Jank.
-            // BTA for some reason needs this to be last or else it uses the wrong lwjgl
-            javaArgList.add(launchClassPath + ":" + getLWJGL3ClassPath());
-        // Legacy Fabric needs this to be first or else it uses the wrong lwjgl
-        } else javaArgList.add(getLWJGL3ClassPath() + ":" + launchClassPath);
+        javaArgList.add("-cp"); javaArgList.add(launchClasspath);
 
         // Forge 1.6.4 crash mitigation
         // https://github.com/MinecraftForge/FML/blob/f1b3381e61fac1a0ae90f521223c6bc613eb4888/common/cpw/mods/fml/common/asm/FMLSanityChecker.java#L192-L208
         // It for some reason fails certification and crashes because it thinks Minecraft is corrupted.
         // This also has no loading screen as a result.
         javaArgList.add("-Dfml.ignoreInvalidMinecraftCertificates=true");
+
+        // imgui-java set library name to use. This because Axiom uses a fork with different library naming
+        // logic that doesn't seem to appear in the main repository. I'm not gonna work with that.
+        javaArgList.add("-Dimgui.library.name=imgui-java");
+        // We use an abomination to support all DH versions with a single library.
+        javaArgList.add("-DZstdNativePath="+Tools.NATIVE_LIB_DIR+"/libzstd-jni-1.5.7-6-dhcompat.so");
 
         javaArgList.add(versionInfo.mainClass);
         javaArgList.addAll(Arrays.asList(launchArgs));
@@ -533,7 +625,7 @@ public final class Tools {
         }
     }
 
-    public static void getCacioJavaArgs(List<String> javaArgList, boolean isJava8) {
+    public static void getCacioJavaArgs(List<String> javaArgList, boolean isJava8, Activity activity) {
         // Caciocavallo config AWT-enabled version
         javaArgList.add("-Djava.awt.headless=false");
         javaArgList.add("-Dcacio.managed.screensize=" + AWTCanvasView.AWT_CANVAS_WIDTH + "x" + AWTCanvasView.AWT_CANVAS_HEIGHT);
@@ -544,10 +636,20 @@ public final class Tools {
             javaArgList.add("-Dawt.toolkit=net.java.openjdk.cacio.ctc.CTCToolkit");
             javaArgList.add("-Djava.awt.graphicsenv=net.java.openjdk.cacio.ctc.CTCGraphicsEnvironment");
         } else {
+            File caciocavavallo17Dir = new File(Tools.DIR_GAME_HOME, "caciocavallo17");
+            File[] caciocavallo17Jars = caciocavavallo17Dir.listFiles((f, s) ->s.contains("cacio-tta"));
+            if(caciocavallo17Jars == null || caciocavallo17Jars.length < 1) {
+            // We wanna avoid the launch being interrupted so we extract again if it isn't found
+                AsyncAssetManager.unpackComponents(activity);
+                caciocavallo17Jars = caciocavavallo17Dir.listFiles((f, s) ->s.contains("cacio-tta"));
+                if(caciocavallo17Jars == null || caciocavallo17Jars.length < 1)
+                    throw new RuntimeException("Failed to extract required assets!");
+            }
+            javaArgList.add("-javaagent:"+caciocavallo17Jars[0].getAbsolutePath());
             javaArgList.add("-Dawt.toolkit=com.github.caciocavallosilano.cacio.ctc.CTCToolkit");
             javaArgList.add("-Djava.awt.graphicsenv=com.github.caciocavallosilano.cacio.ctc.CTCGraphicsEnvironment");
-            javaArgList.add("-Djava.system.class.loader=com.github.caciocavallosilano.cacio.ctc.CTCPreloadClassLoader");
-
+            // This approach breaks kilt so we use an agent instead
+//          javaArgList.add("-Djava.system.class.loader=com.github.caciocavallosilano.cacio.ctc.CTCPreloadClassLoader");
             javaArgList.add("--add-exports=java.desktop/java.awt=ALL-UNNAMED");
             javaArgList.add("--add-exports=java.desktop/java.awt.peer=ALL-UNNAMED");
             javaArgList.add("--add-exports=java.desktop/sun.awt.image=ALL-UNNAMED");
@@ -689,47 +791,31 @@ public final class Tools {
         return libInfos[0].replaceAll("\\.", "/") + "/" + libInfos[1] + "/" + libInfos[2] + "/" + libInfos[1] + "-" + libInfos[2] + ".jar";
     }
 
+    private static String getLibClasspath(JMinecraftVersionList.Version info){
+        StringBuilder libClasspath = new StringBuilder();
+        String[] classpath = generateLibClasspath(info);
+        for (String jarFile : classpath) {
+            libClasspath.append(jarFile).append(":");
+        }
+        // Remove the ':' at the end
+        libClasspath.setLength(libClasspath.length() - 1);
+        return libClasspath.toString();
+    }
+
     public static String getClientClasspath(String version) {
         return DIR_HOME_VERSION + "/" + version + "/" + version + ".jar";
     }
+    public static String generateLaunchClasspath(JMinecraftVersionList.Version info, String actualname) {
+        StringBuilder launchClasspath = new StringBuilder(); //versnDir + "/" + version + "/" + version + ".jar:";
+        String lwjgl3Folder = new File(Tools.DIR_GAME_HOME, "lwjgl3").getAbsolutePath();
+        String lwjgl3File = lwjgl3Folder + "/lwjgl-glfw-classes.jar";
+        String lwjglxFile = lwjgl3Folder + "/lwjglx-classes.jar";
 
-    private static String getLWJGL3ClassPath() {
-        StringBuilder libStr = new StringBuilder();
-        File lwjgl3Folder = new File(Tools.DIR_GAME_HOME, "lwjgl3");
-        File[] lwjgl3Files = lwjgl3Folder.listFiles();
-        if (lwjgl3Files != null) {
-            for (File file: lwjgl3Files) {
-                if (file.getName().endsWith(".jar")) {
-                    libStr.append(file.getAbsolutePath()).append(":");
-                }
-            }
-        }
-        // Remove the ':' at the end
-        libStr.setLength(libStr.length() - 1);
-        return libStr.toString();
-    }
-
-    private final static boolean isClientFirst = false;
-    public static String generateLaunchClassPath(JMinecraftVersionList.Version info, String actualname) {
-        StringBuilder finalClasspath = new StringBuilder(); //versnDir + "/" + version + "/" + version + ".jar:";
-
-        String[] classpath = generateLibClasspath(info);
-
-        if (isClientFirst) {
-            finalClasspath.append(getClientClasspath(actualname));
-        }
-        for (String jarFile : classpath) {
-            if (!FileUtils.exists(jarFile)) {
-                Log.d(APP_NAME, "Ignored non-exists file: " + jarFile);
-                continue;
-            }
-            finalClasspath.append((isClientFirst ? ":" : "")).append(jarFile).append(!isClientFirst ? ":" : "");
-        }
-        if (!isClientFirst) {
-            finalClasspath.append(getClientClasspath(actualname));
-        }
-
-        return finalClasspath.toString();
+        launchClasspath.append(lwjgl3File).append(":");
+        launchClasspath.append(getLibClasspath(info)).append(":");
+        launchClasspath.append(getClientClasspath(actualname));
+        if (!isLwjgl3) launchClasspath.append(":").append(lwjglxFile);
+        return launchClasspath.toString();
     }
 
 
@@ -1015,8 +1101,14 @@ public final class Tools {
     public static String[] generateLibClasspath(JMinecraftVersionList.Version info) {
         List<String> libDir = new ArrayList<>();
         for (DependentLibrary libItem: info.libraries) {
+            if(libItem.name.startsWith("org.lwjgl.lwjgl:lwjgl:2.")) isLwjgl3 = false;
+            String libPath = Tools.DIR_HOME_LIBRARY + "/" + artifactToPath(libItem);
+            if (!FileUtils.exists(libPath)) {
+                Log.d(APP_NAME, "Ignored non-exists file: " + libPath);
+                continue;
+            }
             if(!checkRules(libItem.rules)) continue;
-            libDir.add(Tools.DIR_HOME_LIBRARY + "/" + artifactToPath(libItem));
+            libDir.add(libPath);
             // Mitigation: Babric doesn't use asm-all for some reason so it does a classpath conflict
             if (libItem.name.startsWith("org.ow2.asm:asm") && !libItem.name.startsWith("org.ow2.asm:asm-all:")){
                 libDir.remove(Tools.DIR_HOME_LIBRARY + "/" + artifactToPath(new DependentLibrary(){{

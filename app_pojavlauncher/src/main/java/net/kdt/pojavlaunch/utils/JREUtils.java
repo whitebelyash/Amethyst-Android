@@ -214,7 +214,7 @@ public class JREUtils {
         }
 
         if(LOCAL_RENDERER != null) {
-            envMap.put("POJAV_RENDERER", LOCAL_RENDERER);
+            envMap.put("AMETHYST_RENDERER", LOCAL_RENDERER);
             if(LOCAL_RENDERER.equals("opengles3_ltw")) {
                 envMap.put("LIBGL_ES", "3");
                 envMap.put("POJAVEXEC_EGL","libltw.so"); // Use ANGLE EGL
@@ -225,6 +225,7 @@ public class JREUtils {
             }
             if (LOCAL_RENDERER.equals("opengles3_desktopgl_zink_kopper")){
                 envMap.put("POJAVEXEC_EGL","libEGL_mesa.so"); // Use Mesa EGL
+                if (Tools.shouldUseUBWC()) envMap.put("FD_DEV_FEATURES", "enable_tp_ubwc_flag_hint=1"); // Turnip fix for OneUI rendering issues
             }
             if (LOCAL_RENDERER.toLowerCase().contains("zink")){
                 // This is sketch but it fixes a lot of things, if it causes problems we can just undo it.
@@ -326,8 +327,8 @@ public class JREUtils {
 
         // Some phones are not using the right number of cores, fix that
         userArgs.add("-XX:ActiveProcessorCount=" + java.lang.Runtime.getRuntime().availableProcessors());
-        // Adds missing lwjgl2 openal methods
-        userArgs.add("-javaagent:"+new File(Tools.DIR_DATA,"lwjgl2_methods_injector/lwjgl2_methods_injector.jar").getAbsolutePath());
+        // Adds/changes methods for compatibility
+        userArgs.add("-javaagent:"+new File(Tools.DIR_DATA,"methods_injector_agent/methods_injector_agent.jar").getAbsolutePath());
 
         userArgs.addAll(JVMArgs);
         activity.runOnUiThread(() -> Toast.makeText(activity, activity.getString(R.string.autoram_info_msg,LauncherPreferences.PREF_RAM_ALLOCATION), Toast.LENGTH_SHORT).show());
@@ -482,22 +483,22 @@ public class JREUtils {
             case "opengles2":
             case "opengles2_5":
             case "opengles3":
-                renderLibrary = "libgl4es_114.so"; break;
+                renderLibrary = "libgl4es_115.so"; break;
             case "vulkan_zink": renderLibrary = "libOSMesa.so"; break;
             case "opengles_mobileglues": renderLibrary = "libmobileglues.so"; break;
             case "opengles3_desktopgl_zink_kopper": renderLibrary = "libglxshim.so"; break;
             case "opengles3_ltw" : renderLibrary = "libltw.so"; break;
             default:
                 Log.w("RENDER_LIBRARY", "No renderer selected, defaulting to opengles2");
-                renderLibrary = "libgl4es_114.so";
+                renderLibrary = "libgl4es_115.so";
                 break;
         }
 
         if (!dlopen(renderLibrary) && !dlopen(findInLdLibPath(renderLibrary))) {
             Log.e("RENDER_LIBRARY","Failed to load renderer " + renderLibrary + ". Falling back to GL4ES 1.1.4");
             LOCAL_RENDERER = "opengles2";
-            renderLibrary = "libgl4es_114.so";
-            dlopen(NATIVE_LIB_DIR + "/libgl4es_114.so");
+            renderLibrary = "libgl4es_115.so";
+            dlopen(NATIVE_LIB_DIR + "/libgl4es_115.so");
         }
         return renderLibrary;
     }
